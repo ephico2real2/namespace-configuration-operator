@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"text/template"
@@ -56,8 +57,9 @@ import (
 // Unconditional templates (any non-blank text outside a top-level guard) always apply, exactly as
 // before this filter existed.
 type TemplateFilter struct {
-	log   logr.Logger
-	funcs template.FuncMap
+	log    logr.Logger
+	funcs  template.FuncMap
+	policy RenderPolicy
 	// cache maps template text to *parsedTemplate. Templates are immutable once read from a CR, and
 	// text/template values are safe for concurrent Execute, so one parse serves every reconcile.
 	cache sync.Map
@@ -68,14 +70,64 @@ type parsedTemplate struct {
 	err  error
 }
 
+// RenderPolicy limits what a CR's templates may do. Everything is off by default, which is the
+// upstream behaviour: any kind, any namespace, `lookup` available. Each knob exists because of a
+// measured escalation path: the operator creates whatever a template renders with a cluster-wide
+// wildcard ClusterRole, and the CRDs' OLM-generated aggregated roles let any cluster-wide `edit`
+// holder create a CR. Without a policy such a principal renders a ClusterRoleBinding to
+// cluster-admin for their own group, or reads any Secret through `lookup`.
+type RenderPolicy struct {
+	// AllowedKinds, when non-empty, is the set of kinds a template may render; anything else fails
+	// the reconcile. Matched on Kind only (case-sensitive), which is what a template author writes.
+	AllowedKinds map[string]bool
+	// RequireSelectedNamespace, for NamespaceConfig, demands that every rendered object is namespaced
+	// and lives in the namespace the template was rendered for. A cluster-scoped kind or another
+	// namespace fails the reconcile.
+	RequireSelectedNamespace bool
+	// DisableLookup removes the `lookup` template function. A template that uses it then fails to
+	// parse ("function lookup not defined"), which is reported as a ReconcileError.
+	DisableLookup bool
+}
+
+// String is the policy as one log line, for the startup log.
+func (p RenderPolicy) String() string {
+	kinds := make([]string, 0, len(p.AllowedKinds))
+	for k := range p.AllowedKinds {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	return fmt.Sprintf("allowedKinds=%v requireSelectedNamespace=%t disableLookup=%t", kinds, p.RequireSelectedNamespace, p.DisableLookup)
+}
+
 // NewTemplateFilter builds a filter whose render fallback uses the same function map as the real
 // renderer. restConfig may be nil (unit tests); only the API-lookup functions need it, and they are
 // only reached by the render fallback.
 func NewTemplateFilter(log logr.Logger, restConfig *rest.Config) *TemplateFilter {
-	return &TemplateFilter{
-		log:   log,
-		funcs: utilstemplates.AdvancedTemplateFuncMap(restConfig, log),
+	return NewTemplateFilterWithPolicy(log, restConfig, RenderPolicy{})
+}
+
+// NewTemplateFilterWithPolicy is NewTemplateFilter with a RenderPolicy applied to every render.
+func NewTemplateFilterWithPolicy(log logr.Logger, restConfig *rest.Config, policy RenderPolicy) *TemplateFilter {
+	funcs := utilstemplates.AdvancedTemplateFuncMap(restConfig, log)
+	if policy.DisableLookup {
+		delete(funcs, "lookup")
 	}
+	return &TemplateFilter{
+		log:    log,
+		funcs:  funcs,
+		policy: policy,
+	}
+}
+
+// checkPolicy is applied to every rendered object before it is handed to the enforcer.
+func (f *TemplateFilter) checkPolicy(obj *unstructured.Unstructured, renderedFor metav1.Object, templateIndex int) error {
+	if len(f.policy.AllowedKinds) > 0 && !f.policy.AllowedKinds[obj.GetKind()] {
+		return fmt.Errorf("template %d rendered kind %q for %s, which the render policy does not allow (allowed: %s)", templateIndex, obj.GetKind(), renderedFor.GetName(), f.policy.String())
+	}
+	if f.policy.RequireSelectedNamespace && obj.GetNamespace() != renderedFor.GetName() {
+		return fmt.Errorf("template %d rendered %s %q in namespace %q for namespace %q; the render policy requires every object to live in the namespace it was rendered for", templateIndex, obj.GetKind(), obj.GetName(), obj.GetNamespace(), renderedFor.GetName())
+	}
+	return nil
 }
 
 // FilterApplicable returns the templates that would render at least one object for obj.
@@ -166,8 +218,11 @@ func (f *TemplateFilter) Render(ctx context.Context, templates []apis.LockedReso
 		if err != nil {
 			return nil, fmt.Errorf("template %d failed to render for %s: %w (template starts %q)", i, obj.GetName(), err, preview(t.ObjectTemplate))
 		}
-		for _, o := range objs {
-			out = append(out, lockedresource.LockedResource{Unstructured: o, ExcludedPaths: t.ExcludedPaths})
+		for j := range objs {
+			if err := f.checkPolicy(&objs[j], obj, i); err != nil {
+				return nil, err
+			}
+			out = append(out, lockedresource.LockedResource{Unstructured: objs[j], ExcludedPaths: t.ExcludedPaths})
 		}
 	}
 	return out, nil

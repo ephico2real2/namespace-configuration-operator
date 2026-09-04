@@ -44,3 +44,26 @@ func TestParseAllowSystemNamespaces(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRenderPolicy(t *testing.T) {
+	p, err := parseRenderPolicy("NAMESPACECONFIG", "", "", "")
+	if err != nil || p.AllowedKinds != nil || p.RequireSelectedNamespace || p.DisableLookup {
+		t.Errorf("empty env must be the zero policy, got %+v err=%v", p, err)
+	}
+	p, err = parseRenderPolicy("NAMESPACECONFIG", " Role, RoleBinding ,", "true", "1")
+	if err != nil || len(p.AllowedKinds) != 2 || !p.AllowedKinds["Role"] || !p.AllowedKinds["RoleBinding"] || !p.RequireSelectedNamespace || !p.DisableLookup {
+		t.Errorf("full policy not parsed, got %+v err=%v", p, err)
+	}
+	if _, err := parseRenderPolicy("GROUPCONFIG", "", "true", ""); err == nil {
+		t.Error("REQUIRE_SELECTED_NAMESPACE must be rejected for GROUPCONFIG")
+	}
+	if _, err := parseRenderPolicy("NAMESPACECONFIG", " , ", "", ""); err == nil {
+		t.Error("an ALLOWED_KINDS that names no kind must be rejected")
+	}
+	if _, err := parseRenderPolicy("NAMESPACECONFIG", "", "yes", ""); err == nil {
+		t.Error("a non-boolean REQUIRE_SELECTED_NAMESPACE must be rejected")
+	}
+	if _, err := parseRenderPolicy("NAMESPACECONFIG", "", "", "maybe"); err == nil {
+		t.Error("a non-boolean DISABLE_TEMPLATE_LOOKUP must be rejected")
+	}
+}

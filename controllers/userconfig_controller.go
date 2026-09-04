@@ -49,6 +49,8 @@ type UserConfigReconciler struct {
 	lockedresourcecontroller.EnforcingReconciler
 	Log            logr.Logger
 	controllerName string
+	// RenderPolicy limits what this controller's templates may render; zero value = no limits.
+	RenderPolicy common.RenderPolicy
 	// templateFilter is built lazily by getTemplateFilter; see there.
 	templateFilter     *common.TemplateFilter
 	templateFilterOnce sync.Once
@@ -213,7 +215,7 @@ func (r *UserConfigReconciler) isTemplateApplicableToUser(template apis.LockedRe
 // there a nil config is fine because their templates never reach an API lookup.
 func (r *UserConfigReconciler) getTemplateFilter() *common.TemplateFilter {
 	r.templateFilterOnce.Do(func() {
-		r.templateFilter = common.NewTemplateFilter(r.Log.WithName("templatefilter"), r.GetRestConfig())
+		r.templateFilter = common.NewTemplateFilterWithPolicy(r.Log.WithName("templatefilter"), r.GetRestConfig(), r.RenderPolicy)
 	})
 	return r.templateFilter
 }

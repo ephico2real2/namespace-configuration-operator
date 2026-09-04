@@ -1092,6 +1092,25 @@ The Namespace, Group and User watches had no predicate, so every status or resou
 
 ---
 
+### Render Policy: Allowed Kinds, Selected Namespace, Lookup Switch
+
+**Status:** ✅ COMPLETED (issue #7; upstream redhat-cop/namespace-configuration-operator#256)
+
+**Problem:**
+With the wildcard ClusterRole, any principal able to create a CR (every cluster-wide `edit` holder, through the OLM
+aggregated roles) can render a ClusterRoleBinding to `cluster-admin`, and `lookup` reads any object.
+
+**Solution:**
+`common.RenderPolicy`, applied in `TemplateFilter.Render` to every rendered object, driven by
+`<CONTROLLER>_ALLOWED_KINDS`, `NAMESPACECONFIG_REQUIRE_SELECTED_NAMESPACE` and `DISABLE_TEMPLATE_LOOKUP`; all off by
+default. The API-server-enforced fix (narrower bundle RBAC with `bind` limited by `resourceNames`) is proposed
+upstream.
+
+**Files Modified:** `controllers/common/templatefilter.go`, the three controllers (`RenderPolicy` field),
+`main.go` (`renderPolicyFromEnv`, `parseRenderPolicy`), tests in `templatefilter_test.go` and `main_test.go`, README.
+
+---
+
 ### Deletion Tracking and Logging
 
 **Status:** ✅ COMPLETED

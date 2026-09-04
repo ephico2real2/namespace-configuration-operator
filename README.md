@@ -56,6 +56,24 @@ This creates a rule in which every time a user from the `corp-ldap` provider is 
 
 More advanced templating functions found in the popular k8s management tool [Helm](https://helm.sh/) is also available. These functions are further described in the Helm [templating](https://helm.sh/docs/chart_template_guide/function_list/#kubernetes-and-chart-functions) documentation.
 
+#### Render policy (hardening)
+
+The operator creates whatever a template renders, with a cluster-wide wildcard ClusterRole. Anyone who may
+create these CRs can therefore render, for example, a ClusterRoleBinding to `cluster-admin`, and the `lookup`
+function reads any object with the operator's credentials. The API-server-enforced answer is a narrower
+ClusterRole in the bundle (tracked upstream); until then, three environment variables limit what templates may
+do. All default to off, which is the upstream behaviour. Set them on the operator Deployment (for an OLM
+install, through the Subscription's `config.env`):
+
+| variable | effect |
+|---|---|
+| `NAMESPACECONFIG_ALLOWED_KINDS`, `GROUPCONFIG_ALLOWED_KINDS`, `USERCONFIG_ALLOWED_KINDS` | comma-separated kinds a template of that CR may render (e.g. `Role,RoleBinding`); any other rendered kind fails the reconcile with `ReconcileError` |
+| `NAMESPACECONFIG_REQUIRE_SELECTED_NAMESPACE` | `true`: every object a NamespaceConfig template renders must be namespaced in the namespace it was rendered for; cluster-scoped objects and other namespaces are refused |
+| `DISABLE_TEMPLATE_LOOKUP` | `true`: the `lookup` function is removed; a template that uses it fails to parse and reports `ReconcileError` |
+
+The effective policy is logged at startup (`render policy ... allowedKinds=[...]`). A refused template does not
+delete or change anything; the CR carries the reason in its `ReconcileError` condition and a Warning event.
+
 #### Conditional templates
 
 An `objectTemplate` may be wrapped in a guard so that it produces an object only for some of the selected

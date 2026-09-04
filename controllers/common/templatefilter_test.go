@@ -463,3 +463,63 @@ func TestOwnedResources_BestEffortAcrossObjects(t *testing.T) {
 		t.Errorf("expected exactly one failure naming b, got %v", failures)
 	}
 }
+
+func TestRenderPolicy(t *testing.T) {
+	crb := apis.LockedResourceTemplate{ObjectTemplate: "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: {{ .Name }}-admin\nsubjects:\n  - kind: Group\n    name: {{ .Name }}\n    apiGroup: rbac.authorization.k8s.io\nroleRef:\n  kind: ClusterRole\n  name: cluster-admin\n  apiGroup: rbac.authorization.k8s.io\n"}
+	rb := apis.LockedResourceTemplate{ObjectTemplate: "apiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: view\n  namespace: {{ .Name }}\nsubjects:\n  - kind: Group\n    name: {{ .Name }}\n    apiGroup: rbac.authorization.k8s.io\nroleRef:\n  kind: ClusterRole\n  name: view\n  apiGroup: rbac.authorization.k8s.io\n"}
+	elsewhere := apis.LockedResourceTemplate{ObjectTemplate: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: leak\n  namespace: kube-system\n"}
+	lookup := apis.LockedResourceTemplate{ObjectTemplate: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n  namespace: {{ .Name }}\ndata:\n  s: {{ (lookup \"v1\" \"Secret\" \"openshift-config\" \"pull-secret\").kind }}\n"}
+	subject := ns("team-a", nil, nil)
+
+	t.Run("no policy: everything renders (upstream behaviour)", func(t *testing.T) {
+		f := NewTemplateFilterWithPolicy(logr.Discard(), nil, RenderPolicy{})
+		out, err := f.Render(context.Background(), []apis.LockedResourceTemplate{crb, rb, elsewhere}, subject)
+		if err != nil || len(out) != 3 {
+			t.Fatalf("expected 3 objects and no error, got %d err=%v", len(out), err)
+		}
+	})
+	t.Run("allowed kinds reject a ClusterRoleBinding and name the policy", func(t *testing.T) {
+		f := NewTemplateFilterWithPolicy(logr.Discard(), nil, RenderPolicy{AllowedKinds: map[string]bool{"Role": true, "RoleBinding": true}})
+		out, err := f.Render(context.Background(), []apis.LockedResourceTemplate{rb, crb}, subject)
+		if err == nil || out != nil {
+			t.Fatalf("expected an error and no partial batch, got %d err=%v", len(out), err)
+		}
+		for _, want := range []string{`kind "ClusterRoleBinding"`, "template 1", "allowedKinds=[Role RoleBinding]"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q should mention %q", err.Error(), want)
+			}
+		}
+		if out, err := f.Render(context.Background(), []apis.LockedResourceTemplate{rb}, subject); err != nil || len(out) != 1 {
+			t.Errorf("an allowed kind must still render, got %d err=%v", len(out), err)
+		}
+	})
+	t.Run("require selected namespace rejects another namespace and cluster-scoped objects", func(t *testing.T) {
+		f := NewTemplateFilterWithPolicy(logr.Discard(), nil, RenderPolicy{RequireSelectedNamespace: true})
+		if _, err := f.Render(context.Background(), []apis.LockedResourceTemplate{elsewhere}, subject); err == nil || !strings.Contains(err.Error(), `namespace "kube-system" for namespace "team-a"`) {
+			t.Errorf("expected a namespace mismatch error, got %v", err)
+		}
+		if _, err := f.Render(context.Background(), []apis.LockedResourceTemplate{crb}, subject); err == nil {
+			t.Errorf("a cluster-scoped object has no namespace and must be rejected")
+		}
+		if out, err := f.Render(context.Background(), []apis.LockedResourceTemplate{rb}, subject); err != nil || len(out) != 1 {
+			t.Errorf("an object in the selected namespace must render, got %d err=%v", len(out), err)
+		}
+	})
+	t.Run("disable lookup makes a lookup template fail to parse, reported as an error", func(t *testing.T) {
+		f := NewTemplateFilterWithPolicy(logr.Discard(), nil, RenderPolicy{DisableLookup: true})
+		_, err := f.Render(context.Background(), []apis.LockedResourceTemplate{lookup}, subject)
+		if err == nil || !strings.Contains(err.Error(), `function "lookup" not defined`) {
+			t.Errorf("expected a parse error naming lookup, got %v", err)
+		}
+		// Without the switch the template parses (it would only fail at execution, against a real API).
+		if pt := NewTemplateFilterWithPolicy(logr.Discard(), nil, RenderPolicy{}).parse(lookup.ObjectTemplate); pt.err != nil {
+			t.Errorf("lookup must parse when not disabled, got %v", pt.err)
+		}
+	})
+	t.Run("String is stable and sorted", func(t *testing.T) {
+		p := RenderPolicy{AllowedKinds: map[string]bool{"RoleBinding": true, "Role": true}, RequireSelectedNamespace: true, DisableLookup: true}
+		if got := p.String(); got != "allowedKinds=[Role RoleBinding] requireSelectedNamespace=true disableLookup=true" {
+			t.Errorf("unexpected String(): %q", got)
+		}
+	})
+}

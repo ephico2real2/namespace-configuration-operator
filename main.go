@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -39,6 +40,7 @@ import (
 
 	redhatcopv1alpha1 "github.com/redhat-cop/namespace-configuration-operator/api/v1alpha1"
 	"github.com/redhat-cop/namespace-configuration-operator/controllers"
+	"github.com/redhat-cop/namespace-configuration-operator/controllers/common"
 	"github.com/redhat-cop/namespace-configuration-operator/internal/version"
 	"github.com/redhat-cop/operator-utils/pkg/util/discoveryclient"
 	"github.com/redhat-cop/operator-utils/pkg/util/lockedresourcecontroller"
@@ -158,6 +160,7 @@ func main() {
 		EnforcingReconciler:   lockedresourcecontroller.NewEnforcingReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetConfig(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("NamespaceConfig_controller"), true, true),
 		Log:                   ctrl.Log.WithName("controllers").WithName("NamespaceConfig"),
 		AllowSystemNamespaces: checkNamespaceScope(),
+		RenderPolicy:          renderPolicyFromEnv("NAMESPACECONFIG"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NamespaceConfig")
 		os.Exit(1)
@@ -167,6 +170,7 @@ func main() {
 	userConfigController := &controllers.UserConfigReconciler{
 		EnforcingReconciler: lockedresourcecontroller.NewEnforcingReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetConfig(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("UserConfig_controller"), true, true),
 		Log:                 ctrl.Log.WithName("controllers").WithName("UserConfig"),
+		RenderPolicy:        renderPolicyFromEnv("USERCONFIG"),
 	}
 
 	if ok, err := discoveryclient.IsGVKDefined(ctx, schema.GroupVersionKind{
@@ -189,6 +193,7 @@ func main() {
 	groupConfigController := &controllers.GroupConfigReconciler{
 		EnforcingReconciler: lockedresourcecontroller.NewEnforcingReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetConfig(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("GroupConfig_controller"), true, true),
 		Log:                 ctrl.Log.WithName("controllers").WithName("GroupConfig"),
+		RenderPolicy:        renderPolicyFromEnv("GROUPCONFIG"),
 	}
 
 	if ok, err := discoveryclient.IsGVKDefined(ctx, schema.GroupVersionKind{
@@ -263,4 +268,55 @@ func parseAllowSystemNamespaces(value string) (bool, error) {
 		return false, fmt.Errorf("%s must be a boolean, got %q: %w", AllowSystemNamespacesEnvVarKey, value, err)
 	}
 	return allow, nil
+}
+
+// renderPolicyFromEnv reads a controller's render policy from the environment, which is the knob an
+// OLM-installed operator exposes (the Subscription's config.env), for the controller named by prefix
+// (NAMESPACECONFIG, GROUPCONFIG, USERCONFIG):
+//
+//	<PREFIX>_ALLOWED_KINDS               comma-separated kinds, e.g. "Role,RoleBinding"; empty = any
+//	<PREFIX>_REQUIRE_SELECTED_NAMESPACE  bool; NamespaceConfig only, others ignore it
+//	DISABLE_TEMPLATE_LOOKUP              bool; applies to all three controllers
+//
+// Every knob defaults to off (the upstream behaviour). The effective policy is logged at startup.
+func renderPolicyFromEnv(prefix string) common.RenderPolicy {
+	policy, err := parseRenderPolicy(prefix, os.Getenv(prefix+"_ALLOWED_KINDS"), os.Getenv(prefix+"_REQUIRE_SELECTED_NAMESPACE"), os.Getenv("DISABLE_TEMPLATE_LOOKUP"))
+	if err != nil {
+		setupLog.Error(err, "invalid render policy")
+		os.Exit(1)
+	}
+	setupLog.Info("render policy", "controller", prefix, "policy", policy.String())
+	return policy
+}
+
+func parseRenderPolicy(prefix, allowedKinds, requireSelectedNamespace, disableLookup string) (common.RenderPolicy, error) {
+	policy := common.RenderPolicy{}
+	if strings.TrimSpace(allowedKinds) != "" {
+		policy.AllowedKinds = map[string]bool{}
+		for _, k := range strings.Split(allowedKinds, ",") {
+			k = strings.TrimSpace(k)
+			if k == "" {
+				continue
+			}
+			policy.AllowedKinds[k] = true
+		}
+		if len(policy.AllowedKinds) == 0 {
+			return policy, fmt.Errorf("%s_ALLOWED_KINDS is set but names no kind", prefix)
+		}
+	}
+	var err error
+	if requireSelectedNamespace != "" {
+		if prefix != "NAMESPACECONFIG" {
+			return policy, fmt.Errorf("%s_REQUIRE_SELECTED_NAMESPACE only applies to NAMESPACECONFIG", prefix)
+		}
+		if policy.RequireSelectedNamespace, err = strconv.ParseBool(requireSelectedNamespace); err != nil {
+			return policy, fmt.Errorf("%s_REQUIRE_SELECTED_NAMESPACE must be a boolean, got %q: %w", prefix, requireSelectedNamespace, err)
+		}
+	}
+	if disableLookup != "" {
+		if policy.DisableLookup, err = strconv.ParseBool(disableLookup); err != nil {
+			return policy, fmt.Errorf("DISABLE_TEMPLATE_LOOKUP must be a boolean, got %q: %w", disableLookup, err)
+		}
+	}
+	return policy, nil
 }
