@@ -122,6 +122,25 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
+      # AN IMMUTABLE TAG HAS TO ACTUALLY BE IMMUTABLE. `git describe` is derived from the commit, so a
+      # RERUN of this workflow — or a second ref naming the same commit — recomputes the same two tag
+      # names, and BUILD_DATE makes the rebuilt image a different digest. Pushing then moves a tag a
+      # consumer has pinned: chart openshift-rbac-automation 0.23.0 pins operatorImage.tag, and it
+      # re-patches the CSV only when the reference STRING changes, so a tag that moves underneath it
+      # delivers new content with no rollout, or old content with no warning. Fail loudly instead.
+      # :latest is excluded on purpose — it is the one alias a manual run is allowed to move.
+      - name: Refuse to overwrite an immutable tag
+        env:
+          VERSION_TAG: ${{ steps.meta.outputs.tag }}
+          SHA_TAG: sha-${{ steps.meta.outputs.commit }}
+        run: |
+          for tag in "$VERSION_TAG" "$SHA_TAG"; do
+            if docker manifest inspect "$IMAGE_REPO:$tag" >/dev/null 2>&1; then
+              echo "::error::$IMAGE_REPO:$tag already exists. These tags are immutable and a rerun would move one. Push a new commit, or delete the tag deliberately if this is a known-bad build."
+              exit 1
+            fi
+          done
+
       - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
