@@ -14,14 +14,21 @@
 #   gh secret set REGISTRY_PASSWORD -R ephico2real2/namespace-configuration-operator
 #
 # TAGS. Every build pushes an immutable tag from `git describe` (e.g. v1.2.6-84-gbc60603) and a
-# sha-<short> alias. `:latest` — which every cluster on the chart's default values pulls on its next
-# pod restart — moves ONLY when a manual run asks for it, never on a plain push. Same rule as
-# hack/push-quay.sh.
+# sha-<short> alias. `:latest` moves ONLY when a manual run asks for it, never on a plain push. Same
+# rule as hack/push-quay.sh.
+#
+# THOSE IMMUTABLE TAGS ARE THE PRODUCT, and master builds them too. Consumers pin one: from chart
+# 0.23.0 the openshift-rbac-automation chart sets operatorImage.tag to a `git describe` tag, because
+# that chart patches an OLM-managed CSV only when the reference STRING changes — a moving `:latest`
+# is never re-patched, so the operator pod never restarts and a new build never reaches the cluster.
+# Master was absent from the triggers below, so merging a fix produced no image to pin at all and the
+# only builds that existed came from branches. It is here now.
 name: image
 
 on:
   push:
     branches:
+      - master
       - 'feature/**'
       - 'fix/**'
     paths-ignore:
